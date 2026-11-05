@@ -1,0 +1,52 @@
+name: Test basic text message
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local webhook receiver
+        run: |
+          rm -rf /tmp/webhook
+          WEBHOOK_DIR=/tmp/webhook WEBHOOK_PORT=18080 nohup node "$GITHUB_WORKSPACE/tests/fixtures/webhook-server.js" > /tmp/webhook-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18080/ >/dev/null; then echo "server ready"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/webhook-server.log
+          echo "FAIL: webhook server did not start"
+          exit 1
+      - id: action
+        uses: .
+        env:
+          INCOMING_WEBHOOK_URL: http://127.0.0.1:18080/services/T000/B000/XXXX
+        with:
+          text: Hello from act
+      - name: Assert response output
+        env:
+          ACTUAL: ${{ steps.action.outputs.response }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "OK" ]; then
+            echo "FAIL: expected 'OK'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert posted payload
+        run: |
+          cat /tmp/webhook/last.json; echo
+          cat /tmp/webhook/last-meta.json; echo
+          node -e '
+            const fs = require("fs");
+            const body = JSON.parse(fs.readFileSync("/tmp/webhook/last.json", "utf8"));
+            const meta = JSON.parse(fs.readFileSync("/tmp/webhook/last-meta.json", "utf8"));
+            const fail = (m) => { console.log("FAIL: " + m); process.exit(1); };
+            if (meta.method !== "POST") fail("expected POST, got " + meta.method);
+            if (meta.url !== "/services/T000/B000/XXXX") fail("unexpected path " + meta.url);
+            if (!meta.contentType.includes("application/json")) fail("unexpected content-type " + meta.contentType);
+            if (body.text !== "Hello from act") fail("unexpected text " + JSON.stringify(body.text));
+            const keys = Object.keys(body);
+            if (keys.length !== 1) fail("expected only text key, got " + keys.join(","));
+            console.log("PASS");
+          '

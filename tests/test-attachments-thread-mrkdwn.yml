@@ -1,0 +1,61 @@
+name: Test attachments, thread_ts and mrkdwn
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local webhook receiver
+        run: |
+          rm -rf /tmp/webhook
+          WEBHOOK_DIR=/tmp/webhook WEBHOOK_PORT=18080 nohup node "$GITHUB_WORKSPACE/tests/fixtures/webhook-server.js" > /tmp/webhook-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18080/ >/dev/null; then echo "server ready"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/webhook-server.log
+          echo "FAIL: webhook server did not start"
+          exit 1
+      - id: action
+        uses: .
+        env:
+          INCOMING_WEBHOOK_URL: http://127.0.0.1:18080/hook
+        with:
+          text: "*not bold*"
+          mrkdwn: "false"
+          thread_ts: '"1234567890.123456"'
+          attachments: |
+            [
+              {
+                "color": "good",
+                "title": "Attachment title",
+                "text": "Attachment body"
+              }
+            ]
+      - name: Assert response output
+        env:
+          ACTUAL: ${{ steps.action.outputs.response }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "OK" ]; then
+            echo "FAIL: expected 'OK'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert payload fields
+        run: |
+          cat /tmp/webhook/last.json; echo
+          node -e '
+            const fs = require("fs");
+            const body = JSON.parse(fs.readFileSync("/tmp/webhook/last.json", "utf8"));
+            const fail = (m) => { console.log("FAIL: " + m); process.exit(1); };
+            if (body.text !== "*not bold*") fail("unexpected text " + JSON.stringify(body.text));
+            if (body.mrkdwn !== false) fail("expected mrkdwn boolean false, got " + JSON.stringify(body.mrkdwn));
+            if (body.thread_ts !== "1234567890.123456") fail("unexpected thread_ts " + JSON.stringify(body.thread_ts));
+            if (!Array.isArray(body.attachments) || body.attachments.length !== 1) fail("attachments not a 1-element array: " + JSON.stringify(body.attachments));
+            const a = body.attachments[0];
+            if (a.color !== "good" || a.title !== "Attachment title" || a.text !== "Attachment body") fail("unexpected attachment " + JSON.stringify(a));
+            if ("blocks" in body) fail("blocks should be absent");
+            console.log("PASS");
+          '
