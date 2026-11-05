@@ -1,0 +1,42 @@
+name: Test legacy attachments
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start fake Slack webhook
+        run: |
+          rm -rf /tmp/slack-mock
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-slack.js" > /tmp/slack-mock.log 2>&1 &
+          for i in $(seq 1 50); do [ -f /tmp/slack-mock/ready ] && break; sleep 0.2; done
+          [ -f /tmp/slack-mock/ready ] || { echo "FAIL: mock did not start"; cat /tmp/slack-mock.log; exit 1; }
+      - id: action
+        uses: .
+        env:
+          INCOMING_WEBHOOK_URL: http://127.0.0.1:18080/ok
+        with:
+          attachments: |
+            [
+              {
+                "color": "good",
+                "fields": [
+                  { "title": "Status", "value": "Success", "short": true }
+                ]
+              }
+            ]
+      - name: Assert posted payload
+        run: |
+          cat /tmp/slack-mock/last.json; echo
+          node -e '
+            const fs = require("fs");
+            const body = JSON.parse(fs.readFileSync("/tmp/slack-mock/last.json", "utf8"));
+            const fail = (m) => { console.log("FAIL: " + m); process.exit(1); };
+            if ("text" in body) fail("text should be absent when not provided");
+            if (!Array.isArray(body.attachments) || body.attachments.length !== 1) fail("attachments should be 1-element array");
+            const a = body.attachments[0];
+            if (a.color !== "good") fail("color " + a.color);
+            if (a.fields[0].title !== "Status" || a.fields[0].value !== "Success" || a.fields[0].short !== true) fail("fields " + JSON.stringify(a.fields));
+            console.log("PASS");
+          '

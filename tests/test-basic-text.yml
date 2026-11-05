@@ -1,0 +1,46 @@
+name: Test basic text message
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start fake Slack webhook
+        run: |
+          rm -rf /tmp/slack-mock
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-slack.js" > /tmp/slack-mock.log 2>&1 &
+          for i in $(seq 1 50); do [ -f /tmp/slack-mock/ready ] && break; sleep 0.2; done
+          [ -f /tmp/slack-mock/ready ] || { echo "FAIL: mock did not start"; cat /tmp/slack-mock.log; exit 1; }
+      - id: action
+        uses: .
+        env:
+          INCOMING_WEBHOOK_URL: http://127.0.0.1:18080/ok
+        with:
+          text: Hello from act
+      - name: Assert response output
+        env:
+          ACTUAL: ${{ steps.action.outputs.response }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "OK" ]; then
+            echo "FAIL: expected 'OK'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert posted payload
+        run: |
+          cat /tmp/slack-mock/last.json; echo
+          cat /tmp/slack-mock/last-meta.json; echo
+          node -e '
+            const fs = require("fs");
+            const body = JSON.parse(fs.readFileSync("/tmp/slack-mock/last.json", "utf8"));
+            const meta = JSON.parse(fs.readFileSync("/tmp/slack-mock/last-meta.json", "utf8"));
+            const fail = (m) => { console.log("FAIL: " + m); process.exit(1); };
+            if (meta.method !== "POST") fail("expected POST, got " + meta.method);
+            if (!meta.contentType.includes("application/json")) fail("bad content-type " + meta.contentType);
+            if (body.text !== "Hello from act") fail("unexpected text " + JSON.stringify(body.text));
+            const keys = Object.keys(body);
+            if (keys.length !== 1) fail("expected only text key, got " + keys.join(","));
+            console.log("PASS");
+          '
