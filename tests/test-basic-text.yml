@@ -1,0 +1,53 @@
+name: Test basic text message
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local webhook receiver
+        run: |
+          export PORT=18081 RECEIVED_FILE=/tmp/slack-basic.jsonl
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-slack-server.js" > /tmp/mock-basic.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18081/health >/dev/null; then echo "server up"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/mock-basic.log
+          echo "FAIL: mock server did not start"
+          exit 1
+      - id: action
+        uses: .
+        env:
+          INCOMING_WEBHOOK_URL: http://127.0.0.1:18081/services/T000/B000/XXXX
+        with:
+          text: Hello from act
+      - name: Assert response output
+        env:
+          ACTUAL: ${{ steps.action.outputs.response }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "OK" ]; then
+            echo "FAIL: expected 'OK'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert posted payload
+        run: |
+          cat /tmp/slack-basic.jsonl
+          node -e '
+            const fs = require("fs");
+            const lines = fs.readFileSync("/tmp/slack-basic.jsonl", "utf8").trim().split("\n").filter(Boolean);
+            if (lines.length !== 1) { console.log("FAIL: expected 1 request, got " + lines.length); process.exit(1); }
+            const r = JSON.parse(lines[0]);
+            if (r.method !== "POST") { console.log("FAIL: method " + r.method); process.exit(1); }
+            if (r.url !== "/services/T000/B000/XXXX") { console.log("FAIL: url " + r.url); process.exit(1); }
+            if (!r.contentType.includes("application/json")) { console.log("FAIL: content-type " + r.contentType); process.exit(1); }
+            const b = JSON.parse(r.body);
+            if (b.text !== "Hello from act") { console.log("FAIL: text " + JSON.stringify(b.text)); process.exit(1); }
+            for (const k of ["blocks","attachments","thread_ts","mrkdwn"]) {
+              if (k in b) { console.log("FAIL: unexpected field " + k); process.exit(1); }
+            }
+            console.log("PASS");
+          '

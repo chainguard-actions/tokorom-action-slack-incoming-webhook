@@ -1,0 +1,59 @@
+name: Test legacy attachments
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local webhook receiver
+        run: |
+          export PORT=18083 RECEIVED_FILE=/tmp/slack-attach.jsonl
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-slack-server.js" > /tmp/mock-attach.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18083/health >/dev/null; then echo "server up"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/mock-attach.log
+          echo "FAIL: mock server did not start"
+          exit 1
+      - id: action
+        uses: .
+        env:
+          INCOMING_WEBHOOK_URL: http://127.0.0.1:18083/services/attach
+        with:
+          attachments: |
+            [
+              {
+                "color": "good",
+                "fields": [
+                  { "title": "Status", "value": "success", "short": true }
+                ]
+              }
+            ]
+      - name: Assert response output
+        env:
+          ACTUAL: ${{ steps.action.outputs.response }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "OK" ]; then
+            echo "FAIL: expected 'OK'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert posted payload
+        run: |
+          cat /tmp/slack-attach.jsonl
+          node -e '
+            const fs = require("fs");
+            const lines = fs.readFileSync("/tmp/slack-attach.jsonl", "utf8").trim().split("\n").filter(Boolean);
+            if (lines.length !== 1) { console.log("FAIL: expected 1 request, got " + lines.length); process.exit(1); }
+            const b = JSON.parse(JSON.parse(lines[0]).body);
+            const fail = (m) => { console.log("FAIL: " + m + " body=" + JSON.stringify(b)); process.exit(1); };
+            if ("text" in b) fail("text should be absent");
+            if (!Array.isArray(b.attachments) || b.attachments.length !== 1) fail("attachments array");
+            const a = b.attachments[0];
+            if (a.color !== "good") fail("color");
+            if (a.fields[0].title !== "Status" || a.fields[0].value !== "success" || a.fields[0].short !== true) fail("fields");
+            console.log("PASS");
+          '

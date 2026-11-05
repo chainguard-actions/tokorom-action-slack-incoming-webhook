@@ -1,0 +1,67 @@
+name: Test blocks with mrkdwn and thread_ts
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local webhook receiver
+        run: |
+          export PORT=18082 RECEIVED_FILE=/tmp/slack-blocks.jsonl
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-slack-server.js" > /tmp/mock-blocks.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18082/health >/dev/null; then echo "server up"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/mock-blocks.log
+          echo "FAIL: mock server did not start"
+          exit 1
+      - id: action
+        uses: .
+        env:
+          INCOMING_WEBHOOK_URL: http://127.0.0.1:18082/services/blocks
+        with:
+          text: Fallback text
+          mrkdwn: "false"
+          thread_ts: '"1234567890.123456"'
+          blocks: |
+            [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Bold* section"
+                }
+              },
+              {
+                "type": "divider"
+              }
+            ]
+      - name: Assert response output
+        env:
+          ACTUAL: ${{ steps.action.outputs.response }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "OK" ]; then
+            echo "FAIL: expected 'OK'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert posted payload
+        run: |
+          cat /tmp/slack-blocks.jsonl
+          node -e '
+            const fs = require("fs");
+            const lines = fs.readFileSync("/tmp/slack-blocks.jsonl", "utf8").trim().split("\n").filter(Boolean);
+            if (lines.length !== 1) { console.log("FAIL: expected 1 request, got " + lines.length); process.exit(1); }
+            const b = JSON.parse(JSON.parse(lines[0]).body);
+            const fail = (m) => { console.log("FAIL: " + m + " body=" + JSON.stringify(b)); process.exit(1); };
+            if (b.text !== "Fallback text") fail("text");
+            if (b.mrkdwn !== false) fail("mrkdwn should be boolean false");
+            if (b.thread_ts !== "1234567890.123456") fail("thread_ts");
+            if (!Array.isArray(b.blocks) || b.blocks.length !== 2) fail("blocks should be array of 2");
+            if (b.blocks[0].type !== "section" || b.blocks[0].text.text !== "*Bold* section") fail("blocks[0]");
+            if (b.blocks[1].type !== "divider") fail("blocks[1]");
+            console.log("PASS");
+          '
